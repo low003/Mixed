@@ -1,0 +1,286 @@
+* Open raw FADN data file and save a copy. Save copy in new working directory
+use // "C:\DIRECTORY\RAW_DATA.dta"
+save // "C:\DIRECTORY\OUTPUT_notrim\WORKING_DATA.dta", replace
+
+* Keep relevant variables, namely: SE016 (unpaid labour worked), SE131 (total output, revenues) SE135 (total crop output, crop revenues), SE206 (total livestock output, livestock revenues) SE275 (total intermediate consumption, variable costs), SE281 (total specific costs, variable costs of production), SE370 (wages paid), and SE420 (farm net profts). Merge file containing indices to produce Bennet-Lowe productivity indicator.
+keep COUNTRY YEAR NUTS2 ID TF8 TF14 SE016 SE131 SE135 SE206 SE275 SE281 SE370 SE420
+destring SE*, replace
+merge m:1 COUNTRY using // "C:\DIRECTORY\INDEX_DATA.dta", nogenerate
+
+* Remove duplicates and clean dataset.
+format ID %21.0g
+duplicates report COUNTRY ID YEAR
+duplicates tag COUNTRY ID YEAR, gen(dup1)
+duplicates drop COUNTRY ID YEAR, force
+duplicates report COUNTRY ID YEAR
+drop dup1
+xtset ID YEAR
+
+* Install relevant Stata packages
+** ssc install reghdfe
+** ssc install ftools
+** ssc install drdid
+** ssc install csdid
+
+* Aggregate TF14 into three classes: 1, specialist cropping; 2, specialist livestock; and 3, mixed-crop-livestock (MCL). 
+gen farmclass = TF14
+replace farmclass = 1 if (farmclass == 15) | (farmclass == 16) | (farmclass == 20) | (farmclass == 35) | (farmclass == 36) | (farmclass == 37) | (farmclass == 38) | (farmclass == 60)
+replace farmclass = 2 if (farmclass == 45) | (farmclass == 48) | (farmclass == 49) | (farmclass == 50) | (farmclass == 70)
+replace farmclass = 3 if farmclass == 80
+
+* We define our numberset K = {1,2,3} in order to write the following code. k signifies the nature of the switch from a specialisation to MCL, taking the values from the relevant farmclass above. A switch to farmclass == 3 from: farmclass == 1 is correspondingly k = 1; farmclass == 2 is correspondingly k = 2; either farmclass == 1 or farmclass == 2 is k = 3.
+** Generate spell variables for switching to farmclass == 3. The prerequisites for a switch to farmclass == 3 are: for two previous, consecutive years prior to switching the farm is not in farmclass == 3; upon switching to farmclass == 3, the following year the farm remains in farmclass == 3. Thus, at least four consecutive years are required.
+forvalues k = 1(1)3 {
+if `k' != 3 {
+sort ID YEAR
+by ID (YEAR): gen byte begin_`k' = (farmclass == 3 & farmclass != L1.farmclass) & (L1.farmclass != 3 & L1.farmclass != .) & (L2.farmclass != 3 & L2.farmclass != .) & (F1.farmclass == 3 & F1.farmclass != .) & (L1.farmclass == `k' & L2.farmclass == `k')
+gen spell_`k' = begin_`k'
+bysort ID (YEAR): replace spell_`k' = 1 if (begin_`k' == 1) | (farmclass == 3 & L1.spell_`k' == 1)
+}
+else {
+sort ID YEAR
+by ID (YEAR): gen byte begin_`k' = (farmclass == 3 & farmclass != L1.farmclass) & (L1.farmclass != 3 & L1.farmclass != .) & (L2.farmclass != 3 & L2.farmclass != .) & (F1.farmclass == 3 & F1.farmclass != .)
+gen spell_`k' = begin_`k'
+bysort ID (YEAR): replace spell_`k' = 1 if (begin_`k' == 1) | (farmclass == 3 & L1.spell_`k' == 1)
+}
+drop begin*
+}
+
+* Adjust NUTS2 regions. Over time, NUTS have evolved, being renamed, merging, and splitting. Farm IDs may also, for various reasons unknown, jump between regions. For clustering with the csdid command, we need that panel IDs are nested within clusters, and hence we need to ensure that IDs are designated NUTS2 regions consistently over the study period. To solve potential causes of errors later, we have a sweeping two-step solution. In principle, the more and bigger clusters we have and the more accurately we can describe where farms are situated the better. Simple NUTS2 name changes are straightforward as this just requires replacing the old name for the newer one. Merged regions are also straightforward as this requries the merged regions to be renamed with the same newer one. In this manner, in the first step, we consolidate regions that we know should cover exactly the same number and IDs of farms. For regions that are split and discontinued, or redefined anew from NUTS3 regions (information which we do not have in this version of the dataset), the solution is more complex. We could simply revert farms belonging to several new regions back to the same older one. This is not ideal as we throw together farms that we KNOW belong to different regions together into the same region (one might argue that we could just as well use a higher level of NUTS to avoid this problem, but we lose granularity and context). To solve this, and concurrently farms jumping between regions ad arbitrium, we take the last NUTS2 observation for the farm ID and replace all previous NUTS2 obervations with the last - in this manner we assume that the farm does not move between regions and we take its last known location for granted. For farms that persist in the dataset following the discontinuation of a NUTS2 region, they are automatically assigned their last known location throughout the study period. Farms that persist in "discontinued regions" do so because they dropped out during the study period before NUTS was amendmended; this simply allows for some farms to be aggregated in larger and older regions, where there MAY be overlap with other smaller and newer regions, but for the sake of clustering are distinct. 
+gen NUTS2_aswas = NUTS2
+** NUTS2 2003-2006 CHANGES
+** DK00 INTO DK01 DK02 DK03 DK04 DK05
+** DEE1 DEE2 DEE3 INTO DEE0
+replace NUTS2 = subinstr(NUTS2, "DEE1", "DEE0", .)
+replace NUTS2 = subinstr(NUTS2, "DEE2", "DEE0", .)
+replace NUTS2 = subinstr(NUTS2, "DEE3", "DEE0", .)
+** SI00 INTO SI01 SI02
+** SE01 INTO SE11
+replace NUTS2 = subinstr(NUTS2, "SE01", "SE11", .)
+** SE02 INTO SE12
+replace NUTS2 = subinstr(NUTS2, "SE02", "SE12", .)
+** SE09 INTO SE21
+replace NUTS2 = subinstr(NUTS2, "SE09", "SE21", .)
+** SE04 INTO SE22
+replace NUTS2 = subinstr(NUTS2, "SE04", "SE22", .)
+** SE0A INTO SE23
+replace NUTS2 = subinstr(NUTS2, "SE0A", "SE23", .)
+** SE06 INTO SE31
+replace NUTS2 = subinstr(NUTS2, "SE06", "SE31", .)
+** SE07 INTO SE32
+replace NUTS2 = subinstr(NUTS2, "SE07", "SE32", .)
+** SE08 INTO SE33
+replace NUTS2 = subinstr(NUTS2, "SE08", "SE33", .)
+** UKM1 INTO UKM5
+replace NUTS2 = subinstr(NUTS2, "UKM1", "UKM5", .)
+** UKM4 INTO UKM6
+replace NUTS2 = subinstr(NUTS2, "UKM4", "UKM6", .)
+** NUTS2 2006-2010 CHANGES
+** DE41 DE42 INTO DE40
+replace NUTS2 = subinstr(NUTS2, "DE41", "DE40", .)
+replace NUTS2 = subinstr(NUTS2, "DE42", "DE40", .)
+** DED1 INTO DED4
+replace NUTS2 = subinstr(NUTS2, "DED1", "DED4", .)
+** DED3 INTO DED5
+replace NUTS2 = subinstr(NUTS2, "DED3", "DED5", .)
+** GR* INTO EL*
+replace NUTS2 = subinstr(NUTS2, "GR", "EL", .)
+** ITD* INTO ITH*
+replace NUTS2 = subinstr(NUTS2, "ITD", "ITH", .)
+** ITE* INTO ITI*
+replace NUTS2 = subinstr(NUTS2, "ITE", "ITI", .)
+** FI13 FI1A INTO FI1D
+replace NUTS2 = subinstr(NUTS2, "FI13", "FI1D", .)
+replace NUTS2 = subinstr(NUTS2, "FI1A", "FI1D", .)
+** FI18 INTO FI1B FI1C
+** UKD2 INTO UKD6
+replace NUTS2 = subinstr(NUTS2, "UKD2", "UKD6", .)
+** UKD5 INTO UKD7
+replace NUTS2 = subinstr(NUTS2, "UKD5", "UKD7", .)
+** NUTS2 2010-2013 CHANGES
+** EL11 INTO EL51
+replace NUTS2 = subinstr(NUTS2, "EL11", "EL51", .)
+** EL12 INTO EL52
+replace NUTS2 = subinstr(NUTS2, "EL12", "EL52", .)
+** EL13 INTO EL53
+replace NUTS2 = subinstr(NUTS2, "EL13", "EL53", .)
+** EL21 INTO EL54
+replace NUTS2 = subinstr(NUTS2, "EL21", "EL54", .)
+** EL14 INTO EL61
+replace NUTS2 = subinstr(NUTS2, "EL14", "EL61", .)
+** EL22 INTO EL62
+replace NUTS2 = subinstr(NUTS2, "EL22", "EL62", .)
+** EL23 INTO EL63
+replace NUTS2 = subinstr(NUTS2, "EL23", "EL63", .)
+** EL24 INTO EL64
+replace NUTS2 = subinstr(NUTS2, "EL24", "EL64", .)
+** EL25 INTO EL65
+replace NUTS2 = subinstr(NUTS2, "EL25", "EL65", .)
+** FR91 INTO FRA1
+replace NUTS2 = subinstr(NUTS2, "FR91", "FRA1", .)
+** FR92 INTO FRA2
+replace NUTS2 = subinstr(NUTS2, "FR92", "FRA2", .)
+** FR93 INTO FRA3
+replace NUTS2 = subinstr(NUTS2, "FR93", "FRA3", .)
+** FR94 INTO FRA4
+replace NUTS2 = subinstr(NUTS2, "FR94", "FRA4", .)
+** SI01 INTO SI03
+replace NUTS2 = subinstr(NUTS2, "SI01", "SI03", .)
+** SI02 INTO SI04
+replace NUTS2 = subinstr(NUTS2, "SI02", "SI04", .)
+** UKI1 INTO UKI3 UKI4
+** UKI2 INTO UKI5 UKI6 UKI7
+** NUTS2 2013-2016 CHANGES
+** IE01 IE02 DISCONTINUED
+** IE04 IE05 IE06 NEW REGIONS FROM NUTS3
+** FR24 INTO FRB0
+replace NUTS2 = subinstr(NUTS2, "FR24", "FRB0", .)
+** FR26 INTO FRC1
+replace NUTS2 = subinstr(NUTS2, "FR26", "FRC1", .)
+** FR43 INTO FRC2
+replace NUTS2 = subinstr(NUTS2, "FR43", "FRC2", .)
+** FR25 INTO FRD1
+replace NUTS2 = subinstr(NUTS2, "FR25", "FRD1", .)
+** FR23 INTO FRD2
+replace NUTS2 = subinstr(NUTS2, "FR23", "FRD2", .)
+** FR30 INTO FRE1
+replace NUTS2 = subinstr(NUTS2, "FR30", "FRE1", .)
+** FR22 INTO FRE2
+replace NUTS2 = subinstr(NUTS2, "FR22", "FRE2", .)
+** FR42 INTO FRF1
+replace NUTS2 = subinstr(NUTS2, "FR42", "FRF1", .)
+** FR21 INTO FRF2
+replace NUTS2 = subinstr(NUTS2, "FR21", "FRF2", .)
+** FR41 INTO FRF3
+replace NUTS2 = subinstr(NUTS2, "FR41", "FRF3", .)
+** FR51 INTO FRG0
+replace NUTS2 = subinstr(NUTS2, "FR51", "FRG0", .)
+** FR52 INTO FRH0
+replace NUTS2 = subinstr(NUTS2, "FR52", "FRH0", .)
+** FR61 INTO FRI1
+replace NUTS2 = subinstr(NUTS2, "FR61", "FRI1", .)
+** FR63 INTO FRI2
+replace NUTS2 = subinstr(NUTS2, "FR63", "FRI2", .)
+** FR53 INTO FRI3
+replace NUTS2 = subinstr(NUTS2, "FR53", "FRI3", .)
+** FR81 INTO FRJ1
+replace NUTS2 = subinstr(NUTS2, "FR81", "FRJ1", .)
+** FR62 INTO FRJ2
+replace NUTS2 = subinstr(NUTS2, "FR62", "FRJ2", .)
+** FR72 INTO FRK1
+replace NUTS2 = subinstr(NUTS2, "FR72", "FRK1", .)
+** FR71 INTO FRK2
+replace NUTS2 = subinstr(NUTS2, "FR71", "FRK2", .)
+** FR82 INTO FRL0
+replace NUTS2 = subinstr(NUTS2, "FR82", "FRL0", .)
+** FR83 INTO FRM0
+replace NUTS2 = subinstr(NUTS2, "FR83", "FRM0", .)
+** FRA1 INTO FRY1
+replace NUTS2 = subinstr(NUTS2, "FRA1", "FRY1", .)
+** FRA2 INTO FRY2
+replace NUTS2 = subinstr(NUTS2, "FRA2", "FRY2", .)
+** FRA3 INTO FRY3
+replace NUTS2 = subinstr(NUTS2, "FRA3", "FRY3", .)
+** FRA4 INTO FRY4
+replace NUTS2 = subinstr(NUTS2, "FRA4", "FRY4", .)
+** FRA5 INTO FRY5
+replace NUTS2 = subinstr(NUTS2, "FRA5", "FRY5", .)
+** LT00 INTO LT01 LT02 FROM NUTS3
+** HU10 INTO HU11 HU12 FROM NUTS3 // HU11 has no farms, basically HU10 INTO HU12
+replace NUTS2 = subinstr(NUTS2, "HU10", "HU12", .)
+** PL11 INTO PL71
+replace NUTS2 = subinstr(NUTS2, "PL11", "PL71", .)
+** PL33 INTO PL72
+replace NUTS2 = subinstr(NUTS2, "PL33", "PL72", .)
+** PL31 INTO PL81
+replace NUTS2 = subinstr(NUTS2, "PL31", "PL81", .)
+** PL32 INTO PL82
+replace NUTS2 = subinstr(NUTS2, "PL32", "PL82", .)
+** PL34 INTO PL84
+replace NUTS2 = subinstr(NUTS2, "PL34", "PL84", .)
+** PL12 INTO PL91 PL92 FROM NUTS3
+** UKM2 INTO UKM7
+replace NUTS2 = subinstr(NUTS2, "UKM2", "UKM7", .)
+** UKM3 INTO UKM8 UKM9 FROM NUTS3
+** NUTS2 2016-2021 CHANGES
+** HR04 INTO HR05 HR06 HR02
+** FIX UKN
+replace NUTS2 = subinstr(NUTS2, "UKN1", "UKN0", .)
+replace NUTS2 = subinstr(NUTS2, "UKN", "UKN0", .) if NUTS2 == "UKN"
+** Take last known NUTS2 location of each ID and replace all NUTS2 designations per ID to last.
+bysort ID (YEAR): replace NUTS2 = NUTS2[_N]
+** Check if IDs have moved between regions, and correct issue manually if needed.
+by ID (NUTS2), sort: gen byte moved = (NUTS2[1] != NUTS2[_N])
+browse if moved
+drop moved
+
+* Generate additional categorical NUTS2 variable.
+quietly tabulate NUTS2, generate(n2_) missing
+rename n2_1 NUTS2_cat
+foreach v of varlist n2_* {
+egen temp1 = max(NUTS2_cat)
+gen temp2 = `v' + temp1 if `v' > 0 
+replace temp2 = 0 if missing(temp2)
+replace NUTS2_cat = NUTS2_cat + temp2
+drop temp1 temp2
+}
+drop n2_*
+
+* Generate Bennet-Lowe indicator.
+forvalues k = 2004(1)2018 {
+if `k' == 2004 {
+gen YC`k' = SE135 if YEAR == `k'
+gen YL`k' = SE206 if YEAR == `k'
+gen XI`k' = SE281 if YEAR == `k'
+}
+else {
+foreach t of varlist OC`k' {
+foreach u of varlist OL`k' {
+foreach v of varlist IN`k' {
+gen YC`k' = SE135 * OC`k' if YEAR == `k'
+gen YL`k' = SE206 * OL`k' if YEAR == `k'
+gen XI`k' = SE281 * IN`k' if YEAR == `k' 
+}
+}
+}
+}
+}
+egen float YC = rowtotal (YC*)
+egen float YL = rowtotal (YL*)
+egen float XI = rowtotal (XI*)
+drop RY2004-IN2018
+drop YC2004-XI2018
+bysort ID (YEAR): gen BLOWE = (APIC * YC) + (APIL * YL) - (AWI * XI)
+drop APIC-AWI YC-XI
+
+* For the analysis: 
+** Produce the variable treatyear_`k' which designates the year that a farm switches for the first time, and is required by csdid for the required gvar() option.
+** We use the command csdid, from Callawy & Sant'Anna (2021). This is followed by various post-estimation statistics. We plot the event-study-type aggregations into event-plots. 
+** We log the results using SMCL, and at the end can then command Stata to close the log, translate it into .pdf, and save the results. 
+
+forvalues k = 1(1)3 {
+foreach s of varlist spell_`k' {
+gen switchyear = YEAR if spell_`k' == 1
+bysort ID: egen treatyear_`k' = min(switchyear)
+drop switchyear
+replace treatyear_`k' = 0 if missing(treatyear_`k')
+}
+}
+save // "C:\DIRECTORY\OUTPUT_notrim\WORKING_DATA.dta", replace
+
+log using // "C:\DIRECTORY\OUTPUT_notrim\OUTPUT.smcl", replace
+
+local vars "SE016 SE131 SE275 SE370 SE420 BLOWE"
+forvalues k = 1(1)2 {
+foreach v of local vars {
+csdid `v', ivar(ID) time(YEAR) gvar(treatyear_`k') cluster(NUTS2_cat) method(reg) level(99)
+estat simple, level(99)
+estat group, level(99)
+estat calendar, level(99)
+estat event, level(99)
+csdid_plot
+graph save // `"C:\DIRECTORY\OUTPUT_notrim\eventplot_`v'_`k'.gph"', replace
+}
+}
+log close
+translate // "C:\DIRECTORY\OUTPUT_notrim\OUTPUT.smcl" "C:\DIRECTORY\OUTPUT_notrim\OUTPUT.pdf", replace
